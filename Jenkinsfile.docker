@@ -1,0 +1,59 @@
+pipeline {
+  agent any
+  environment {
+    IMAGE         = 'laravel-crud'
+    APP_CONTAINER = 'laravel-crud'
+    DB_CONTAINER  = 'laravel-db'
+    NET           = 'laravel-net'
+    PORT          = '8081'
+    DB_NAME       = 'laravel_crud'
+    DB_USER       = 'laravel'
+    DB_PASS       = 'LaravelPass123'
+    DB_ROOT       = 'RootPass123'
+    APP_KEY       = credentials('laravel-app-key')
+  }
+  stages {
+    stage('Checkout') { steps { checkout scm } }
+    stage('Build Image') {
+      steps { sh 'docker build -t $IMAGE:$BUILD_NUMBER -t $IMAGE:latest .' }
+    }
+    stage('Validate Image') {
+      steps { sh 'docker run --rm -e APP_KEY=$APP_KEY $IMAGE:latest php artisan --version' }
+    }
+    stage('Start Database') {
+      steps {
+        sh '''
+          docker network inspect $NET >/dev/null 2>&1 || docker network create $NET
+          if ! docker ps -a --format '{{.Names}}' | grep -qx $DB_CONTAINER; then
+            docker run -d --name $DB_CONTAINER --network $NET --restart unless-stopped \
+              -e MARIADB_ROOT_PASSWORD=$DB_ROOT -e MARIADB_DATABASE=$DB_NAME \
+              -e MARIADB_USER=$DB_USER -e MARIADB_PASSWORD=$DB_PASS \
+              -v laravel-db-data:/var/lib/mysql mariadb:11
+          else
+            docker start $DB_CONTAINER
+          fi
+          for i in $(seq 1 30); do
+            docker exec $DB_CONTAINER mariadb -u$DB_USER -p$DB_PASS -e 'SELECT 1' >/dev/null 2>&1 && break
+            sleep 2
+          done
+        '''
+      }
+    }
+    stage('Deploy Container') {
+      steps {
+        sh '''
+          docker rm -f $APP_CONTAINER || true
+          docker run -d --name $APP_CONTAINER --network $NET --restart unless-stopped -p $PORT:80 \
+            -e APP_ENV=production -e APP_DEBUG=false -e APP_KEY=$APP_KEY \
+            -e DB_CONNECTION=mysql -e DB_HOST=$DB_CONTAINER -e DB_PORT=3306 \
+            -e DB_DATABASE=$DB_NAME -e DB_USERNAME=$DB_USER -e DB_PASSWORD=$DB_PASS \
+            -e SESSION_DRIVER=file -e CACHE_STORE=file -e QUEUE_CONNECTION=sync \
+            $IMAGE:latest
+          sleep 5
+          docker exec $APP_CONTAINER php artisan migrate --force
+          curl -fsS http://localhost:$PORT/products > /dev/null
+        '''
+      }
+    }
+  }
+}

@@ -1,0 +1,48 @@
+pipeline {
+  agent any
+  triggers { pollSCM('H/2 * * * *') }
+  environment { APP_DIR = '/var/www/laravel-app' }
+  stages {
+    stage('Checkout') { steps { checkout scm } }
+    stage('Install') {
+      steps {
+        sh 'composer install --no-interaction --prefer-dist --no-progress'
+        sh '[ -f .env ] || cp .env.example .env'
+        sh 'php artisan key:generate --force'
+      }
+    }
+    stage('Test') {
+      steps { sh 'DB_CONNECTION=sqlite DB_DATABASE=:memory: php artisan test' }
+    }
+    stage('Deploy') {
+      steps {
+        sh '''
+          rsync -a --delete --exclude='.git' --exclude='.env' --exclude='vendor' \
+                --exclude='storage/logs' --exclude='node_modules' ./ $APP_DIR/
+          cd $APP_DIR
+          if [ ! -f .env ]; then
+            cp .env.example .env
+            php artisan key:generate --force
+            sed -i -E '/^#?[[:space:]]*(DB_CONNECTION|DB_HOST|DB_PORT|DB_DATABASE|DB_USERNAME|DB_PASSWORD|SESSION_DRIVER|CACHE_STORE)=/d' .env
+            cat >> .env <<'EOF'
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=laravel_crud
+DB_USERNAME=laravel
+DB_PASSWORD=LaravelPass123
+SESSION_DRIVER=file
+CACHE_STORE=file
+EOF
+          fi
+          composer install --no-dev --optimize-autoloader --no-interaction
+          mkdir -p storage/logs storage/framework/cache storage/framework/sessions storage/framework/views bootstrap/cache
+          chgrp -R www-data storage bootstrap/cache
+          chmod -R ug+rwX storage bootstrap/cache
+          php artisan config:clear
+          php artisan migrate --force
+        '''
+      }
+    }
+  }
+}
